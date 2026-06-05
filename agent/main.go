@@ -44,8 +44,9 @@ func main() {
 	http.HandleFunc("/file/write", handleFileWrite)
 	http.HandleFunc("/file/delete", handleFileDelete)
 
-	// 2. Terminal PTY WebSocket bridge
+	// 2. Terminal PTY WebSocket bridge and Yjs Collaboration pub-sub
 	http.HandleFunc("/term", handleTerminalWebSocket)
+	http.HandleFunc("/collaboration", handleCollaboration)
 
 	log.Printf("Workspace Agent listening on port %s...", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
@@ -308,5 +309,92 @@ func handleTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			// Fallback: write raw text message directly to PTY stdin
 			_, _ = ptyFile.Write(payload)
 		}
+	}
+}
+
+// thread-safe connection wrapper for Yjs Pub-Sub broadcast
+type safeConn struct {
+	sync.Mutex
+	*websocket.Conn
+}
+
+func (s *safeConn) write(messageType int, data []byte) error {
+	s.Lock()
+	defer s.Unlock()
+	return s.WriteMessage(messageType, data)
+}
+
+type CollaborationRoom struct {
+	sync.RWMutex
+	clients map[*safeConn]bool
+}
+
+var (
+	roomsMutex sync.RWMutex
+	rooms      = make(map[string]*CollaborationRoom)
+)
+
+// handleCollaboration routes Yjs CRDT binary updates and cursor awareness updates to room members
+func handleCollaboration(w http.ResponseWriter, r *http.Request) {
+	roomName := r.URL.Query().Get("room")
+	if roomName == "" {
+		roomName = "default"
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Collaboration upgrade failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	sConn := &safeConn{Conn: conn}
+
+	// Fetch or create room
+	roomsMutex.Lock()
+	room, exists := rooms[roomName]
+	if !exists {
+		room = &CollaborationRoom{
+			clients: make(map[*safeConn]bool),
+		}
+		rooms[roomName] = room
+	}
+	roomsMutex.Unlock()
+
+	// Register connection
+	room.Lock()
+	room.clients[sConn] = true
+	room.Unlock()
+
+	// Unregister connection on cleanup
+	defer func() {
+		room.Lock()
+		delete(room.clients, sConn)
+		if len(room.clients) == 0 {
+			roomsMutex.Lock()
+			delete(rooms, roomName)
+			roomsMutex.Unlock()
+		}
+		room.Unlock()
+	}()
+
+	// Listen and broadcast binary / text updates
+	for {
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+
+		// Broadcast message to all other participants in the room
+		room.RLock()
+		for client := range room.clients {
+			if client != sConn {
+				// Safe concurrent write
+				go func(sc *safeConn, mt int, data []byte) {
+					_ = sc.write(mt, data)
+				}(client, messageType, payload)
+			}
+		}
+		room.RUnlock()
 	}
 }

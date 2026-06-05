@@ -8,6 +8,7 @@ import (
 
 	"terminas-core/src/config"
 	"terminas-core/src/models"
+	"terminas-core/src/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -24,10 +25,53 @@ func WorkspaceProxyHandler() gin.HandlerFunc {
 			return
 		}
 
-		// Retrieve container private IP from PostgreSQL
+		// 1. Resolve token from Header, Cookie, or Query Params
+		var tokenStr string
+		authHeader := c.GetHeader("Authorization")
+		if authHeader != "" {
+			parts := strings.Split(authHeader, " ")
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				tokenStr = parts[1]
+			}
+		}
+
+		if tokenStr == "" {
+			if cookie, err := c.Cookie("token"); err == nil {
+				tokenStr = cookie
+			}
+		}
+
+		if tokenStr == "" {
+			tokenStr = c.Query("token")
+		}
+
+		if tokenStr == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Workspace authentication token required"})
+			c.Abort()
+			return
+		}
+
+		// 2. Validate token claims
+		claims, err := utils.ValidateToken(tokenStr)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid collaboration session"})
+			c.Abort()
+			return
+		}
+
+		userEmail := claims["email"].(string)
+
+		// 3. Retrieve container details and guard ownership access
 		var workspace models.Container
 		if err := config.DB.First(&workspace, "id = ?", containerID).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Workspace not found"})
+			c.Abort()
+			return
+		}
+
+		// Restrict access strictly to the workspace owner
+		if workspace.Email != userEmail {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: insufficient workspace permissions"})
 			c.Abort()
 			return
 		}
@@ -38,7 +82,7 @@ func WorkspaceProxyHandler() gin.HandlerFunc {
 			return
 		}
 
-		// Setup reverse proxy director
+		// 4. Setup reverse proxy director
 		targetURL, _ := url.Parse("http://" + workspace.PrivateIP + ":4000")
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
@@ -46,7 +90,6 @@ func WorkspaceProxyHandler() gin.HandlerFunc {
 		proxy.Director = func(req *http.Request) {
 			originalDirector(req)
 			// Strip the prefix /ws/container/:id from the request path
-			// E.g., /ws/container/:id/project/files -> /project/files
 			prefixPath := "/ws/container/" + containerIDStr
 			if strings.HasPrefix(req.URL.Path, prefixPath) {
 				req.URL.Path = strings.TrimPrefix(req.URL.Path, prefixPath)
@@ -59,6 +102,6 @@ func WorkspaceProxyHandler() gin.HandlerFunc {
 
 		// Execute proxy request directly on the response writer
 		proxy.ServeHTTP(c.Writer, c.Request)
-		c.Abort() // Abort Gin request handling since proxy took over response output
+		c.Abort()
 	}
 }
