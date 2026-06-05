@@ -1,0 +1,29 @@
+# Environments
+.env
+.env.local
+
+# Go
+bin/
+main
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.sum
+
+# Node / React
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDEs / System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

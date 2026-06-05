@@ -8,6 +8,7 @@ import (
 	"terminas-core/src/config"
 	"terminas-core/src/controllers"
 	"terminas-core/src/middlewares"
+	"terminas-core/src/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -15,6 +16,9 @@ import (
 func main() {
 	// Initialize database connection and schemas
 	config.ConnectDatabase()
+
+	// Initialize Docker connection and private network
+	services.InitDockerClient()
 
 	// Initialize Gin router
 	router := gin.Default()
@@ -60,6 +64,20 @@ func main() {
 		userRoutes.GET("/me", controllers.GetCurrentUser)
 		userRoutes.POST("/profile-pic", controllers.UploadProfilePic)
 	}
+
+	// Container management routes (Authenticated)
+	containerRoutes := router.Group("/containers")
+	containerRoutes.Use(middlewares.AuthMiddleware())
+	{
+		containerRoutes.POST("/create", controllers.CreateWorkspace)
+		containerRoutes.POST("/start", controllers.StartWorkspace)
+		containerRoutes.POST("/stop", controllers.StopWorkspace)
+		containerRoutes.DELETE("/:id", controllers.DeleteWorkspace)
+		containerRoutes.GET("", controllers.ListWorkspaces)
+	}
+
+	// Dynamic Path-Based Reverse Proxy Gateway
+	router.Any("/ws/container/:id/*any", middlewares.WorkspaceProxyHandler())
 
 	// Public profile resource endpoint
 	router.GET("/profile-pic/:email", controllers.DownloadProfilePic)
