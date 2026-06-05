@@ -20,6 +20,9 @@ func main() {
 	// Initialize Docker connection and private network
 	services.InitDockerClient()
 
+	// Start background idle monitoring poller
+	services.StartIdlePoller()
+
 	// Initialize Gin router
 	router := gin.Default()
 
@@ -74,6 +77,7 @@ func main() {
 		containerRoutes.POST("/stop", controllers.StopWorkspace)
 		containerRoutes.DELETE("/:id", controllers.DeleteWorkspace)
 		containerRoutes.GET("", controllers.ListWorkspaces)
+		containerRoutes.GET("/:id/stats", controllers.GetWorkspaceStats)
 	}
 
 	// Dynamic Path-Based Reverse Proxy Gateway

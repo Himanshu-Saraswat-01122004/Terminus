@@ -16,11 +16,49 @@ export default function Workspace({ containerId, workspaceName, username, onBack
   const [activeFile, setActiveFile] = useState<string>('main.js');
   const [loadingFile, setLoadingFile] = useState<boolean>(false);
   const [collabUsers, setCollabUsers] = useState<string[]>([]);
+  const [stats, setStats] = useState<{ cpu: number; ram: number }>({ cpu: 0, ram: 0 });
+  const [warnSuspension, setWarnSuspension] = useState<boolean>(false);
   
   const editorRef = useRef<any>(null);
   const providerRef = useRef<WebsocketProvider | null>(null);
   const bindingRef = useRef<MonacoBinding | null>(null);
   const ydocRef = useRef<Y.Doc | null>(null);
+
+  // Poll container resources and idle warnings
+  useEffect(() => {
+    const token = localStorage.getItem('token') || '';
+    
+    const pollInterval = setInterval(async () => {
+      // 1. Fetch container Docker telemetry stats
+      try {
+        const statsRes = await fetch(`http://localhost:3000/containers/${containerId}/stats`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (statsRes.ok) {
+          const statsData = await statsRes.json();
+          setStats({
+            cpu: statsData.cpu_percentage,
+            ram: statsData.memory_usage_mb
+          });
+        }
+      } catch (err) {
+        console.error("Failed to fetch telemetry:", err);
+      }
+
+      // 2. Fetch agent idle warnings status
+      try {
+        const idleRes = await fetch(`http://localhost:3000/ws/container/${containerId}/idle-status?token=${encodeURIComponent(token)}`);
+        if (idleRes.ok) {
+          const idleData = await idleRes.json();
+          setWarnSuspension(idleData.warn_suspension);
+        }
+      } catch (err) {
+        console.error("Failed to fetch idle status:", err);
+      }
+    }, 5000);
+
+    return () => clearInterval(pollInterval);
+  }, [containerId]);
 
   // Initialize and tear down Yjs document session
   const initYjs = (editor: any) => {
@@ -137,6 +175,19 @@ export default function Workspace({ containerId, workspaceName, username, onBack
           </div>
         </div>
 
+        {/* Telemetry Resource Stats */}
+        <div className="hidden md:flex items-center gap-4 text-[11px] text-gray-400 font-mono bg-[#0d121f]/40 border border-white/5 px-4 py-1.5 rounded-full">
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
+            <span>CPU: <strong className="text-white">{stats.cpu.toFixed(1)}%</strong></span>
+          </div>
+          <div className="w-px h-3.5 bg-white/10"></div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse"></span>
+            <span>RAM: <strong className="text-white">{stats.ram.toFixed(1)} MB</strong> / 512 MB</span>
+          </div>
+        </div>
+
         {/* Active Collaborators list */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 px-3 py-1 rounded-full border border-white/5 bg-[#0d121f]/60 text-xs text-gray-400">
@@ -154,6 +205,13 @@ export default function Workspace({ containerId, workspaceName, username, onBack
           </button>
         </div>
       </header>
+
+      {/* Auto-Suspend Warnings */}
+      {warnSuspension && (
+        <div className="bg-yellow-500/10 border-b border-yellow-500/20 px-6 py-2 flex items-center justify-between text-xs text-yellow-400 z-10 animate-pulse shrink-0">
+          <span className="font-medium">⚠️ Sandbox Warning: Workspace has been inactive. It will auto-suspend shortly to conserve compute balance. Type or move cursor to resume.</span>
+        </div>
+      )}
 
       {/* Editor & Panel area */}
       <div className="flex flex-1 overflow-hidden">

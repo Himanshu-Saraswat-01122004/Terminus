@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -225,4 +226,79 @@ func ListWorkspaces(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"workspaces": workspaces})
+}
+
+// GetWorkspaceStats streams a single snapshot of container resources
+func GetWorkspaceStats(c *gin.Context) {
+	containerIDStr := c.Param("id")
+	containerID, err := uuid.Parse(containerIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid workspace ID"})
+		return
+	}
+
+	var workspace models.Container
+	if err := config.DB.First(&workspace, "id = ?", containerID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Workspace not found"})
+		return
+	}
+
+	if workspace.Status != "running" {
+		c.JSON(http.StatusOK, gin.H{
+			"cpu_percentage":  0.0,
+			"memory_usage_mb": 0.0,
+			"memory_limit_mb": 512.0,
+			"status":          "stopped",
+		})
+		return
+	}
+
+	ctx := context.Background()
+	resp, err := services.DockerCli.ContainerStats(ctx, workspace.DockerID, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch container telemetry"})
+		return
+	}
+	defer resp.Body.Close()
+
+	var statsData struct {
+		CPUStats struct {
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
+			SystemCPUUsage uint64 `json:"system_cpu_usage"`
+		} `json:"cpu_stats"`
+		PreCPUStats struct {
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
+			SystemCPUUsage uint64 `json:"system_cpu_usage"`
+		} `json:"precpu_stats"`
+		MemoryStats struct {
+			Usage uint64 `json:"usage"`
+			Limit uint64 `json:"limit"`
+		} `json:"memory_stats"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&statsData); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode container telemetry"})
+		return
+	}
+
+	cpuPercent := 0.0
+	cpuDelta := float64(statsData.CPUStats.CPUUsage.TotalUsage) - float64(statsData.PreCPUStats.CPUUsage.TotalUsage)
+	systemDelta := float64(statsData.CPUStats.SystemCPUUsage) - float64(statsData.PreCPUStats.SystemCPUUsage)
+	if systemDelta > 0.0 && cpuDelta > 0.0 {
+		cpuPercent = (cpuDelta / systemDelta) * 100.0
+	}
+
+	memoryMB := float64(statsData.MemoryStats.Usage) / (1024.0 * 1024.0)
+	memoryLimitMB := float64(statsData.MemoryStats.Limit) / (1024.0 * 1024.0)
+
+	c.JSON(http.StatusOK, gin.H{
+		"cpu_percentage":  cpuPercent,
+		"memory_usage_mb": memoryMB,
+		"memory_limit_mb": memoryLimitMB,
+		"status":          "running",
+	})
 }

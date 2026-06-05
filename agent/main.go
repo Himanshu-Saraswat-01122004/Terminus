@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -32,6 +33,18 @@ type FileNode struct {
 	Child []FileNode  `json:"child,omitempty"`
 }
 
+// Activity tracking indicators
+var (
+	activityMutex sync.RWMutex
+	lastActivity  = time.Now()
+)
+
+func updateActivity() {
+	activityMutex.Lock()
+	lastActivity = time.Now()
+	activityMutex.Unlock()
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -43,6 +56,7 @@ func main() {
 	http.HandleFunc("/file/read", handleFileRead)
 	http.HandleFunc("/file/write", handleFileWrite)
 	http.HandleFunc("/file/delete", handleFileDelete)
+	http.HandleFunc("/idle-status", handleIdleStatus)
 
 	// 2. Terminal PTY WebSocket bridge and Yjs Collaboration pub-sub
 	http.HandleFunc("/term", handleTerminalWebSocket)
@@ -73,6 +87,7 @@ func safePath(target string) (string, error) {
 
 // handleFileTree recursively builds a directory node representation of workspace files
 func handleFileTree(w http.ResponseWriter, r *http.Request) {
+	updateActivity()
 	relPath := r.URL.Query().Get("path")
 	fullPath, err := safePath(relPath)
 	if err != nil {
@@ -136,6 +151,7 @@ func buildFileTree(path string) (FileNode, error) {
 
 // handleFileRead reads text contents of a target file
 func handleFileRead(w http.ResponseWriter, r *http.Request) {
+	updateActivity()
 	target := r.URL.Query().Get("path")
 	fullPath, err := safePath(target)
 	if err != nil {
@@ -155,6 +171,7 @@ func handleFileRead(w http.ResponseWriter, r *http.Request) {
 
 // handleFileWrite updates or creates file contents
 func handleFileWrite(w http.ResponseWriter, r *http.Request) {
+	updateActivity()
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -192,6 +209,7 @@ func handleFileWrite(w http.ResponseWriter, r *http.Request) {
 
 // handleFileDelete removes a file or recursive folder
 func handleFileDelete(w http.ResponseWriter, r *http.Request) {
+	updateActivity()
 	if r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -287,6 +305,8 @@ func handleTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
+
+		updateActivity()
 
 		if messageType == websocket.TextMessage {
 			// Check if message is a JSON command (like resize)
@@ -385,6 +405,8 @@ func handleCollaboration(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		updateActivity()
+
 		// Broadcast message to all other participants in the room
 		room.RLock()
 		for client := range room.clients {
@@ -397,4 +419,20 @@ func handleCollaboration(w http.ResponseWriter, r *http.Request) {
 		}
 		room.RUnlock()
 	}
+}
+
+// handleIdleStatus returns JSON details showing activity duration
+func handleIdleStatus(w http.ResponseWriter, r *http.Request) {
+	activityMutex.RLock()
+	idleDuration := time.Since(lastActivity)
+	activityMutex.RUnlock()
+
+	// Idle warning: 10 mins (600s), Suspension: 15 mins (900s)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"idle_seconds":      int(idleDuration.Seconds()),
+		"is_idle":           idleDuration > 15*time.Minute,
+		"warn_suspension":   idleDuration > 10*time.Minute,
+		"last_activity_utc": lastActivity.Format(time.RFC3339),
+	})
 }
