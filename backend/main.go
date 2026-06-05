@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"terminas-core/src/config"
+	"terminas-core/src/controllers"
+	"terminas-core/src/middlewares"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,6 +19,20 @@ func main() {
 	// Initialize Gin router
 	router := gin.Default()
 
+	// CORS Setup
+	router.Use(func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
+
 	// Default health check endpoint
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -24,6 +40,29 @@ func main() {
 			"message": "Terminas Orchestrator Backend is running.",
 		})
 	})
+
+	// Auth routes group
+	authRoutes := router.Group("/auth")
+	{
+		authRoutes.POST("/register", controllers.Register)
+		authRoutes.POST("/login", controllers.Login)
+		authRoutes.GET("/logout", controllers.Logout)
+		authRoutes.GET("/github", controllers.RedirectToGitHub)
+		authRoutes.GET("/github/callback", controllers.GitHubCallback)
+		authRoutes.GET("/google", controllers.RedirectToGoogle)
+		authRoutes.GET("/google/callback", controllers.GoogleCallback)
+	}
+
+	// User authenticated routes
+	userRoutes := router.Group("/user")
+	userRoutes.Use(middlewares.AuthMiddleware())
+	{
+		userRoutes.GET("/me", controllers.GetCurrentUser)
+		userRoutes.POST("/profile-pic", controllers.UploadProfilePic)
+	}
+
+	// Public profile resource endpoint
+	router.GET("/profile-pic/:email", controllers.DownloadProfilePic)
 
 	// Get server port from env or fallback to 3000
 	port := os.Getenv("PORT")
